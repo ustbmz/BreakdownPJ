@@ -8,6 +8,8 @@
 
 ## 怎么学
 
+顺序、每周读哪一课、学完怎么验收，见 [学习安排.md](./学习安排.md)。默认一天 2 小时，六周走完四个项目：Pledge → NFTMarket → 永续 → market-match。
+
 每个子目录先打开「项目拆解文档」，把产品、架构、数据流搞清楚；再按「学习笔记」对着源码一课一课过。笔记里不掺前端 / 后端（撮合引擎那份只覆盖 `match/`）。
 
 | 项目 | 是什么 | 拆解文档 | 学习笔记 |
@@ -34,6 +36,7 @@
 
 ```
 BreakdownPJ/
+├── 学习安排.md                   # 六周顺序：Pledge → NFT → 永续 → 撮合
 ├── ProjectBreakdown-Pledge/      # 合约 pledgev2 + 后端 + 前端
 ├── ProjectBreakdown-NFTMarket/   # EasySwap 合约 / Sync / Backend / 前端
 ├── perpetual-contract/           # Foundry 永续 + others/backend + others/fe
