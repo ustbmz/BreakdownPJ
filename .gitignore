@@ -1,0 +1,48 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Dependencies / build
+node_modules/
+out/
+cache/
+artifacts/
+broadcast/
+coverage/
+vendor/
+target/
+build/
+dist/
+bin/
+*.exe
+
+# Logs
+*.log
+log/
+logs/
+
+# Foundry / Hardhat
+lcov.info
+report/
+.coverage*
+
+# market-match runtime
+market-match/data/
+market-match/sp/
+market-match/log/
+
+# Compiled binaries
+ProjectBreakdown-NFTMarket/EasySwapBackend/bin/
+ProjectBreakdown-NFTMarket/EasySwapSync/EasySwapSync
