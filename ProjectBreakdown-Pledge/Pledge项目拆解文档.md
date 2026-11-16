@@ -118,6 +118,8 @@ flowchart TB
 - **后端 api**：给前端提供池列表、代币信息、价格。
 - **前端**：展示列表走 HTTP；存取款、领凭证走钱包直连合约。
 
+
+
 ---
 
 ## 4. 角色、资产与凭证
@@ -205,6 +207,8 @@ stateDiagram-v2
 ---
 
 ## 6. 完整用户旅程（对照前端页面）
+
+![](https://files.seeusercontent.com/2026/11/16/3ugX/Pledge.png)
 
 ### 6.1 放款人
 
