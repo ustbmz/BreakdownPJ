@@ -9,6 +9,16 @@ pragma solidity ^0.8.19;
  *   - 按订单维度（OrderKey）记录 ETH 与 NFT 余额，支持挂单/改单/成交时的资金与 NFT 流转。
  *   - 支持订单编辑（editETH/editNFT）：改价或改数量时，在旧订单与新订单之间迁移托管资产。
  *   - 支持订单簿发起的直接 NFT 转账（transferERC721）以及用户批量转 NFT（batchTransferERC721）。
+ *
+ * 【学习注释 · 第 2 课】
+ * 用户不能自己调存取。除了 batchTransferERC721，其余转账都挂 onlyEasySwapOrderBook。
+ * ERC721 要 approve 给本合约（Vault），不是 OrderBook。depositNFT 内部是
+ * safeTransferFrom(卖家, Vault, tokenId)。
+ *
+ * 部署顺序：先 Vault.initialize，再 OrderBook.initialize(vault)，再 Vault.setOrderBook。
+ *
+ * 挂单后 NFT 不在卖家钱包里，在本合约。取消或成交才 withdrawNFT 转走。
+ * 改价走 editNFT：NFT 不离开金库，只把 tokenId 从旧 OrderKey 记到新 OrderKey。
  */
 
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
@@ -53,6 +63,7 @@ contract EasySwapVault is IEasySwapVault, OwnableUpgradeable {
     }
 
     /// @notice 订单簿为某订单存入 ETH（如买单挂单时锁定出价）
+    /// @dev 记账加的是 msg.value，不是参数 ETHAmount。ETHAmount 只用来检查「至少带了这么多」。
     function depositETH(
         OrderKey orderKey,
         uint256 ETHAmount
@@ -128,7 +139,8 @@ contract EasySwapVault is IEasySwapVault, OwnableUpgradeable {
         delete NFTBalance[oldOrderKey];
     }
 
-    /// @notice 订单簿发起的单笔 NFT 转账（如撮合时从卖家转给买家）
+    /// @notice 卖家接受 Bid、但自己的卖单不在盘口时：NFT 从卖家钱包直接转给买家，不经过 Vault 记账
+    /// @dev 卖家仍须事先把 NFT approve 给 Vault，因为转账是本合约代发的。
     function transferERC721(
         address from,
         address to,

@@ -39,7 +39,7 @@ EasySwap 是一个 **链上订单簿（OrderBook DEX）形态的 NFT 市场**。
 
 ```
 ProjectBreakdown-NFTMarket/
-├── EasySwapContract/     # 智能合约（Hardhat + Solidity 0.8.19，可升级）
+├── EasySwapContract/     # 智能合约（Hardhat + Solidity 0.8.19）
 ├── EasySwapSync/         # 事件索引：扫 LogMake / LogCancel / LogMatch
 ├── EasySwapBackend/      # HTTP API：Collection / Item / Order / Activity
 ├── EasySwapBase/         # 共享库：DB 模型、链客户端、订单管理器
@@ -107,16 +107,45 @@ flowchart TB
 
 ## 4. 角色、订单与资产
 
-### 4.1 角色
+### 4.1 角色（卖家 Maker、买家 Maker、Taker、协议 Owner）
 
-| 角色 | 做什么 | 对应合约动作 |
-| --- | --- | --- |
-| 卖家 Maker（List） | 锁 NFT，挂固定单价 | `approve(Vault)` → `makeOrders(List)` |
-| 买家 Maker（Bid） | 锁 ETH，对单品或整集合出价 | `makeOrders(Bid)` + `msg.value` |
-| Taker | 吃对方已存在的单 | `matchOrder(sell, buy)` |
-| 协议 Owner | 改费率、暂停、提取协议费 | `setProtocolShare` / `pause` / `withdrawETH` |
+同一用户可以既是 Maker 又是 Taker：挂单后等人来买，也可以自己去吃别人的出价。挂单、取消、改价都不把 NFT 过户给买家。只有 `matchOrder` 才同时完成过户、付款和抽成。两条资金流的细节在 4.3。
 
-同一用户可以既是 Maker 又是 Taker：挂单后等人来买，也可以自己去吃别人的出价。
+**卖家 Maker（List）**
+
+锁 NFT，挂固定单价：`approve(Vault)` → `makeOrders(List)`。
+
+| 动作 | 注解 |
+| --- | --- |
+| `approve(Vault)` | 授权给金库，不是 OrderBook。之后 `depositNFT` 才能把这一件从卖家钱包转进 Vault |
+| `makeOrders(List)` | 挂卖单。`amount` 必须是 1。成功后 NFT 进 Vault，订单写入价格树，返回这张单的 OrderKey |
+
+**买家 Maker（Bid）**
+
+锁 ETH，对单品或整集合出价：`makeOrders(Bid)` + `msg.value`。
+
+| 动作 | 注解 |
+| --- | --- |
+| `makeOrders(Bid)` | 按 `单价 × amount` 把 ETH 锁进 Vault。多付的退回。可以是某一件，也可以是整集合出价 |
+
+**Taker**
+
+吃对方已存在的单：`matchOrder(sell, buy)`。调用者必须是卖单或买单的 maker。
+
+| 动作 | 注解 |
+| --- | --- |
+| `matchOrder`（买家来调） | 成交价用卖价。没事先挂 Bid 就是 Buy Now，钱从 `msg.value` 出 |
+| `matchOrder`（卖家来调） | 成交价用买价。ETH 已经在 Vault，`msg.value` 必须是 0 |
+
+**协议 Owner**
+
+改费率、暂停、提取协议费。
+
+| 动作 | 注解 |
+| --- | --- |
+| `setProtocolShare` | 改费率。`250 / 10000 = 2.5%`，上限 10%。已经挂着的单下次成交按新费率算 |
+| `pause` | `make` / `cancel` / `edit` / `match` 都不能再调。已经锁在 Vault 里的资产要等 `unpause` |
+| `withdrawETH` | 把成交时留在 OrderBook 里的协议费转走。用户的 NFT 和出价 ETH 在 Vault，不在这里 |
 
 ### 4.2 订单结构（`LibOrder.Order`）
 
@@ -140,13 +169,23 @@ flowchart TB
 2. 买家构造一个匹配的 Bid（可以不先上链），调 `matchOrder`。
 3. 买家当场付 ETH（`msg.value >= 挂单价`），NFT 从 Vault 转给买家。
 
+| 动作 | 注解 |
+| --- | --- |
+| `makeOrders(List)` | 卖单 `amount` 必须是 1。`depositNFT` 把这一件转进 Vault，`NFTBalance[orderKey] = tokenId`，再 `_addOrder` 写入价格树 |
+| `matchOrder` | 调用者是买单 maker。卖单必须已经在盘口。成交价 = 卖价。Bid 没进盘口就是 Buy Now：`msg.value >= 卖价`，不必事先 `makeOrders(Bid)`。NFT 用 `withdrawNFT` 从 Vault 给买家。卖家收到 `卖价 - 协议费` |
+
 **路径 B：卖家吃出价**
 
 1. 买家已 `makeOrders(Bid)`，ETH 在 Vault。
 2. 卖家构造或使用已有 List，调 `matchOrder`。
 3. 从 Vault 扣买家 ETH 给卖家（扣协议费），NFT 从 Vault 或卖家钱包转给买家。
 
-集合出价（`FixedPriceForCollection`）只出现在 Bid 侧：买的是「这个合约下任意一个 token」，成交时 tokenId 以卖单为准。
+| 动作 | 注解 |
+| --- | --- |
+| `makeOrders(Bid)` | 按 `单价 × amount` 调用 `depositETH`，ETH 记在这张 Bid 的 OrderKey 上。多付的由 `makeOrders` 退回。集合出价 `FixedPriceForCollection` 只出现在这里：买「这个合约下任意一件」，成交时 tokenId 以卖单为准 |
+| `matchOrder` | 调用者是卖单 maker。`msg.value` 必须是 0，否则 `"HD: value > 0"`。成交价 = 买价。ETH 用 `withdrawETH` 从 Bid 那一格抽到 OrderBook，再付给卖家。卖单已在盘口：`withdrawNFT`；卖单不在盘口：`transferERC721` 从卖家钱包直接转给买家，卖家仍要先 `approve` 给 Vault |
+
+两条路径的协议费都是 `成交价 × protocolShare / 10000`，留在 OrderBook，Owner 以后 `withdrawETH` 提走。路径 A 的成交价是卖价：S 挂 1 ETH，B 直接买，S 得 0.975 ETH。路径 B 的成交价是买价：B 出价 1.2 ETH，S 接受，S 得 1.17 ETH。
 
 ---
 
@@ -209,15 +248,6 @@ sequenceDiagram
 
 买家 `makeOrders(Bid)` 把 ETH 锁进 Vault；卖家 `matchOrder` 时 `msg.value` 必须为 0，钱从 Vault 出。
 
-前端对应：
-
-| 步骤 | 页面 | 调用 |
-| --- | --- | --- |
-| 浏览合集/物品 | `app/collections` | Backend GET `/collections/...` |
-| 授权 + 挂单 | `portfolio` listing 弹窗 | `approveNFT` → `makeOrders` |
-| 出价 | `place-bid-dialog` | `makeOrders(Bid)` |
-| 立即购买 | listings 表 / 物品页 | `matchOrder` 或 `buyNowWithMulticall` |
-
 ---
 
 ## 7. 合约层
@@ -242,7 +272,7 @@ flowchart LR
     V --> NFT
 ```
 
-`EasySwapOrderBook` 多重继承：`OrderStorage` + `ProtocolManager` + `OrderValidator`，再单独指向 Vault。可升级（UUPS/Transparent 那一套 OZ Initializable），存储末尾都留了 `__gap`。
+`EasySwapOrderBook` 多重继承：`OrderStorage` + `ProtocolManager` + `OrderValidator`，再单独指向 Vault。
 
 | 合约 | 职责 |
 | --- | --- |
@@ -257,24 +287,24 @@ flowchart LR
 
 ### 7.2 用户操作 → 合约方法
 
-| 业务 | 方法 | 谁能调 | 资产变化 |
+| 业务 | 方法 | 谁能调 | 注解 |
 | --- | --- | --- | --- |
-| 批量挂单/出价 | `makeOrders` | maker = msg.sender | List 锁 NFT；Bid 锁 ETH |
-| 批量取消 | `cancelOrders` | 仅 maker | NFT/未成交 ETH 退回 |
-| 改价改数量 | `editOrders` | 仅 maker | 取消旧单 + 建新单，Vault `editNFT/editETH` |
-| 成交 | `matchOrder` | 卖单 maker 或买单 maker | NFT 过户，ETH 结算，扣协议费 |
-| 批量成交 | `matchOrders` | 同上 | delegatecall 逐笔，失败记事件不回滚整批 |
-| 聚合操作 | `multicall` | 用户 | 一笔交易里串联 make/cancel/edit/match；最多 1 个消耗 msg.value 的子调用 |
-| 查最优价 | `getBestPrice` / `getBestOrder` | 任意 | 无 |
-| 分页盘口 | `getOrders` | 任意 | 无 |
+| 批量挂单/出价 | `makeOrders` | maker = msg.sender | 一次可挂多张。字段不合格的那张返回 `0x0`，其它单留下。NFT 没授权，或 ETH 不够，整笔回滚 |
+| 批量取消 | `cancelOrders` | 仅 maker | 卖单退 NFT。买单只退 `单价 × 未成交件数`。成功后 `filledAmount` 写成最大值，这把 key 不能再成交 |
+| 改价改数量 | `editOrders` | 仅 maker | 先取消旧单再挂新单，OrderKey 一定变。卖单的 NFT 不离开 Vault。买单可改高（补差额进金库）也可改低（多的 ETH 退回） |
+| 成交 | `matchOrder` | 卖单或买单的 maker | 成交价取被吃那一边。协议费留在 OrderBook，当时不打给 Owner |
+| 批量成交 | `matchOrders` | 同上 | `delegatecall` 逐对撮合。某一对失败只记 `BatchMatchInnerError`，后面的继续。多付的 ETH 最后退一次 |
+| 聚合操作 | `multicall` | 用户 | 一笔交易里串联 make / cancel / edit / match。会花钱的子调用最多一个，否则同一笔 `msg.value` 会被看到两次 |
+| 查最优价 | `getBestPrice` / `getBestOrder` | 任意 | List 取最低卖价，Bid 取最高买价。同价先返回队列 `head`。只读，不改资产 |
+| 分页盘口 | `getOrders` | 任意 | 从某一档接着翻。跳过过期单；查集合 Bid 时滤掉单品 Bid |
 
 ### 7.3 盘口数据结构（读 OrderStorage 的钥匙）
 
 每个 collection、每个方向一棵价格树：
 
 ```
-priceTrees[collection][List]  → 最低价在树根一侧（first）
-priceTrees[collection][Bid]   → 最高价（last）
+priceTrees[collection][List]  → first()，最左边，最低卖价
+priceTrees[collection][Bid]   → last()，最右边，最高买价
 
 orderQueues[collection][side][price] → 链表 head/tail
 orders[orderKey] → { order, next }
@@ -332,189 +362,36 @@ fee = fillPrice × protocolShare / 10000
 ### 7.6 和 Seaport 对照时值得讲的点
 
 - 资产先托管，挂单不可再拿到别的市场去卖（除非先 cancel）。
-- `makeOrders` 失败的单会 `LogSkipOrder` 而不是整笔 revert，批量里允许部分成功。
+- `makeOrders` 里，字段不合格的单返回 `0x0` 并允许部分成功。NFT 没授权、ETH 不够会整笔回滚，不是跳过。
 - `matchOrders` 用 delegatecall，单笔失败不拖垮整批，靠 `BatchMatchInnerError` 暴露原因。
 - List 限制 `amount == 1`，当前就是 ERC721 市场，不是 1155 通用市场。
 
 ---
 
-## 8. 后端层
+## 8. 链下：只做列表
 
-### 8.1 为什么要后端
+合约是资产和订单的账本。链下不托管 NFT，也不替用户发成交交易。
 
-链上可以 `getOrders` 分页，但前端还需要：
+Sync 从 OrderBook 扫 `LogMake` / `LogCancel` / `LogMatch`，写入数据库，并记住扫到哪一块。Pledge 的后端是轮询合约上的 view；这里订单事件少、要精确到每一笔，所以扫日志。Backend 只读这些表，给页面提供合集、物品、出价和活动。列表会比链上晚几个区块。地板价是库里算出来的，不是页面每次去调 `getBestPrice`。
 
-- 合集封面、描述、trait、地板价、成交历史
-- 跨页搜索、排行榜、用户投资组合
-- 活动流（mint / list / sale / transfer）
+前端两件事：列表走 Backend；授权、挂单、出价、购买走钱包，直接调合约。授权对象是 Vault。
 
-所以后端做 **索引 + 查询**。用户成交不经过后端。
-
-和 Pledge 的差别：Pledge 的 schedule **轮询 view**；这里的 Sync **扫事件日志**。NFT 订单事件稀疏、需要精确到每笔订单，用 FilterLogs 更合适。
-
-### 8.2 三个 Go 模块
-
-| 模块 | 入口 | 职责 |
-| --- | --- | --- |
-| EasySwapSync | `go run main.go daemon` | 扫 OrderBook 事件，写订单/活动/地板价 |
-| EasySwapBackend | `src/main.go` | gin API |
-| EasySwapBase | 被前两者 replace 引用 | 表结构、chain client、OrderManager |
-
-### 8.3 Sync：事件监听与入库
-
-`EasySwapSync/service/orderbookindexer/service.go`：
-
-1. 读表 `indexed_status` 的 `last_indexed_block`
-2. `BlockNumber()` 减确认数（sepolia 配了 8 块）得到安全高度
-3. `FilterLogs`：地址 = Dex 合约，区间最多约 1000 块
-4. 按 topic 分发：
-
-| Topic | 事件 | 入库 |
-| --- | --- | --- |
-| `LogMake` | 挂单/出价 | 订单表 + activity |
-| `LogCancel` | 取消 | 订单状态关闭 |
-| `LogMatch` | 成交 | 订单成交、item owner、成交价、activity |
-| ERC721 Approval | 授权 | 辅助状态 |
-
-5. 写回 `last_indexed_block`，下一轮从这里续扫
-
-还有 `UpKeepingCollectionFloorChangeLoop` 维护地板价。`EasySwapBase/ordermanager` 用时间轮处理过期订单缓存。
-
-这是标准的「链上日志索引器」：有断点、有确认延迟、有分叉检查（`checkAndHandleFork`）。
-
-### 8.4 API 设计（`/api/v1`）
-
-| 路径 | 用途 |
-| --- | --- |
-| `GET /collections/ranking` | 排行榜（Redis 缓存 60s） |
-| `GET /collections/:address` | 合集详情 |
-| `GET /collections/:address/items` | 物品列表 |
-| `GET /collections/:address/:token_id` | 物品详情 |
-| `GET /collections/:address/bids` | 集合出价 |
-| `GET /collections/:address/:token_id/bids` | 单品出价 |
-| `GET /activities` | 活动流 |
-| `GET /portfolio/*` | 用户合集/物品/挂单/出价 |
-| `GET /bid-orders` | 出价订单 |
-| `POST /user/login` | 钱包签名登录 |
-| `POST /metanode/mint` | 测试 NFT 铸造相关 |
-| `POST /admin/...` | 导入合集、同步 metadata |
-
-Controller 不发用户交易。`chain_id` 用来分表（如 `ob_order_sepolia`）。
-
-### 8.5 数据模型（和 README 里的表一致）
-
-| 表 | 对应实体 |
-| --- | --- |
-| `ob_collection_*` | 合集：地板价、总成交量、封面 |
-| `ob_item_*` | 单个 NFT：owner、挂单价、上次成交价 |
-| `ob_order_*` | 链上订单镜像：hash、type、price、maker |
-| `ob_activity_*` | 事件：Buy/Mint/List/Cancel/Offer/Sell/Transfer |
-
-链是账本，表是给前端用的只读投影。
+用户点「立即购买」时，钱和 NFT 的路径在第 6、7 节。后端不参与这笔转账。
 
 ---
 
-## 9. 前端层
+## 9. 从业务角度怎么读代码
 
-Next.js App Router。核心链上封装：`nft-market-fe/contracts/service/orderBookContract.ts`。
+合约按学习笔记的课时读。拆解文档看到这里，函数级细节以笔记为准。
 
-| 页面 | 业务 |
-| --- | --- |
-| `/collections` | 市场首页、排行 |
-| `/collections/[name]` | 合集物品、挂单表、出价 |
-| `/collections/[name]/[tokenId]` | 物品详情、购买 |
-| `/portfolio` | 我的 NFT、挂单弹窗 |
-| `/activity` | 活动 |
-| `/mint` | 铸造测试 NFT |
-
-数据来源：
-
-```
-合集、物品、地板价、活动  →  Backend HTTP
-当前授权、余额           →  ERC721 / 钱包
-挂单、出价、购买         →  OrderBook.send
-```
-
-授权对象是 **Vault 地址**，不是 OrderBook。漏授权时 `depositNFT` 会失败。
+1. `LibOrder.sol`：订单字段和 OrderKey。
+2. `EasySwapVault.sol`：挂单时资产进哪张表。
+3. `OrderStorage.sol`：三个卖价怎么进树、同价谁在 `head`。
+4. `EasySwapOrderBook.sol`：`makeOrders` → 取消 / 改价 → `_isMatchAvailable` → `_matchOrder` 两个分支 → `matchOrders` / `multicall`。
 
 ---
 
-## 10. 三端数据流转
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User as 用户
-    participant FE as 前端
-    participant API as Backend
-    participant DB as MySQL
-    participant Sync as EasySwapSync
-    participant Chain as OrderBook / Vault
-
-    Sync->>Chain: FilterLogs 从 last_indexed_block
-    Chain-->>Sync: LogMake / LogMatch / LogCancel
-    Sync->>DB: 更新 order / item / activity
-
-    User->>FE: 打开合集页
-    FE->>API: GET /collections/:addr/items
-    API->>DB: SELECT
-    DB-->>FE: 列表 + 地板价
-
-    User->>FE: 授权并挂单
-    FE->>Chain: approve + makeOrders
-    Chain-->>User: LogMake
-
-    Note over Sync,FE: 扫到事件后列表刷新
-    User->>FE: Buy Now
-    FE->>Chain: matchOrder + ETH
-    Chain-->>User: NFT + LogMatch
-```
-
-三条铁律：
-
-1. **钱和 NFT 只在 Vault / OrderBook 里动。**
-2. **列表可以延迟几个区块**（确认数 + 扫块周期）。
-3. **成交参数必须和链上订单字节级一致**，否则 hash 对不上，match 会失败。
-
----
-
-## 11. 从业务角度怎么读代码
-
-### 第一遍：订单长什么样（1 小时）
-
-`LibOrder.sol` → `EasySwapVault.sol` 的 deposit/withdraw。问：挂单时资产去哪了？
-
-### 第二遍：盘口（2 小时）
-
-`OrderStorage._addOrder` / `_removeOrder` / `getBestPrice`。在纸上画「同一 collection 三个卖价」的树和链表。
-
-### 第三遍：成交（2 小时）
-
-`_matchOrder` 两个分支（`msg.sender == sell.maker` vs `buy.maker`）对照着读。每一步标注 NFT 从哪到哪、ETH 从哪到哪。
-
-### 第四遍：索引（1 小时）
-
-`SyncOrderBookEventLoop` → `handleMakeEvent`。对照 Pledge 的「轮询 PoolBaseInfo」，能说出为什么这里必须扫 log。
-
----
-
-## 12. 同类型项目对照
-
-| 问题 | EasySwap 的答案 | 换项目时看哪里 |
-| --- | --- | --- |
-| 订单在链上还是链下 | 链上 | 搜 Order 是 `mapping` 还是 `signature` |
-| 资产谁托管 | Vault，仅 OrderBook 可动 | 搜 custody / vault / escrow |
-| 价格怎么排 | 红黑树 + FIFO | 搜 bestPrice / heap / sorted |
-| 成交谁发起 | Taker 调 match | 搜 fill / match / take |
-| 协议费 | protocolShare / 10000 | 搜 fee / royalty |
-| 后端是否管钱 | 否，扫事件 | 搜 FilterLogs vs 私钥发交易 |
-| 索引方式 | 事件 + 断点区块 | 搜 last_indexed_block / subgraph |
-
-先画「用户 → 前端 → 合约 / 索引器」三条线，再补「List vs Bid」两条资金流。
-
----
-
-## 13. 讲解提纲
+## 10. 讲解提纲
 
 **1. 这是什么**  
 链上 NFT 订单簿。挂单锁资产，Taker 来撮合，协议从成交额抽成。
@@ -539,13 +416,34 @@ Sync 扫 `LogMake/Cancel/Match` 入库；API 给前端列表。不管钱。
 
 ---
 
-## 14. 读完后的自检
+## 11. 拆解自检
 
 1. 挂单时 NFT 授权给 OrderBook 还是 Vault？
+
+   授权给 Vault。 卖家 `approve` 或 `setApprovalForAll` 的对象是金库，不是 OrderBook。挂单成功后，这一件 NFT 也在 Vault 里
+
 2. 改价为什么必须换 OrderKey？
+
+   因为OrderKey =  hash(Order)
+
 3. 买家 Buy Now 一定要先 `makeOrders` 吗？
+
+   不用。 Buy Now 不必先 `makeOrders`。卖单已经在盘口上，买家当场用 `msg.value` 付款。只有事先挂过 Bid，成交时才从 Vault 抽 ETH。
+
 4. 卖家接受 Bid 时为什么 `msg.value` 必须为 0？
+
+   调用者是卖单 maker。`msg.value` 必须是 0，否则 `"HD: value > 0"`
+
 5. 集合出价成交时 tokenId 以哪一侧为准？
+
+   成交时 tokenId 以卖单为准
+
 6. `filledAmount == type(uint256).max` 表示什么？
+
+   `type(uint256).max` 已取消
+
 7. Sync 和 Pledge 的 schedule 同步方式差在哪？
-8. 前端列表上的地板价是链上 `getBestPrice` 现查，还是库里算出来的？
+
+   Sync 扫事件日志，Pledge 的 schedule 轮询合约上的 view。 NFT 这边扫的是 `LogMake`、`LogCancel`、`LogMatch`，并记住扫到哪一块
+
+   

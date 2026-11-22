@@ -8,6 +8,14 @@ pragma solidity ^0.8.19;
  *   - 校验订单必填项（maker、过期时间、salt、NFT 资产、价格等），支持按需跳过过期校验（如取消时）。
  *   - 通过 filledAmount 记录每笔订单的已成交数量；值为 CANCELLED 表示已取消，不可再撮合。
  *   - 提供更新已成交量、取消订单的接口，供订单簿在成交或用户取消时调用。
+ *
+ * 【学习注释 · 第 3 课】filledAmount[orderKey] 四种读法：
+ *   0                  还没成交
+ *   1 .. amount-1      部分成交（集合 Bid 的 amount 才可能大于 1）
+ *   amount             完全成交
+ *   type(uint256).max  已取消（常量 CANCELLED）
+ *
+ * 已取消的单再拿去 match，会在 _getFilledAmount 的 require != CANCELLED 被拦住。
  */
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";

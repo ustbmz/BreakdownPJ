@@ -124,14 +124,49 @@ flowchart TB
 
 ## 4. 角色、资产与凭证
 
-### 4.1 角色
+### 4.1 角色（放款人、借款人、多签管理员、平台）
 
-| 角色 | 做什么 | 对应合约动作 |
-| --- | --- | --- |
-| 放款人 Lender | 存稳定币，到期拿本金 + 固定利息 | `depositLend` → `claimLend` → `withdrawLend` |
-| 借款人 Borrower | 押加密资产，settle 后提走稳定币 | `depositBorrow` → `claimBorrow` → `withdrawBorrow` |
-| 多签管理员 | 建池、撮合、到期结算、清算、改参数 | `createPoolInfo` / `settle` / `finish` / `liquidate` |
-| 平台 | 收 lendFee / borrowFee | `feeAddress` |
+存款只把资产打进池子，不铸 sp/jp。`settle` 只记账、不转钱。成交的凭证在 `claim*` 里铸，没成交的资产在 `refund*` 里退。
+
+**放款人 Lender**
+
+存稳定币，到期拿本金加固定利息：`depositLend` → `claimLend` → `withdrawLend`。
+
+| 动作 | 注解 |
+| --- | --- |
+| `depositLend` | 募集期、状态是 MATCH 才能存。稳定币进 PledgePool，只记 `stakeAmount`。这一笔不铸 spToken |
+| `refundLend` | settle 之后，没成交的稳定币按份额退回。成交的那部分不在这里拿 |
+| `claimLend` | 按成交额 `settleAmountLend` 的份额铸 spToken。只拿凭证，不拿稳定币 |
+| `withdrawLend` | 烧掉 sp。到期走 `finishAmountLend` 里自己的份额（本金 + 利息）。若已清算，走 `liquidationAmounLend`。不用原来的 `stakeAmount` |
+| `emergencyLendWithdrawal` | 一边存成 0、池子变成 UNDONE 时，按原存入额退回。没有 sp 可烧 |
+
+**借款人 Borrower**
+
+押加密资产，settle 后提走稳定币：`depositBorrow` → `claimBorrow` → `withdrawBorrow`。
+
+| 动作 | 注解 |
+| --- | --- |
+| `depositBorrow` | 和放款人同一窗口存抵押物。只记 `stakeAmount`，不铸 jpToken |
+| `refundBorrow` | 没用来覆盖借款的抵押物退回 |
+| `claimBorrow` | 铸 jpToken，同时把成交的稳定币打给借款人。jp 总量 = `settleAmountLend × martgageRate / 1e8`，表示这笔债对应的抵押物份额，不是借到的 U |
+| `withdrawBorrow` | 烧掉 jp，按份额拿回剩余抵押物。到期用 `finishAmountBorrow`，清算用 `liquidationAmounBorrow` |
+| `emergencyBorrowWithdrawal` | 池子 UNDONE 时，抵押物原路退回 |
+
+**多签管理员**
+
+建池、撮合、到期结算、清算。这些函数都过 `validCall`：批准的是「这个调用者 × 这份合约」，不绑定某一个函数。链上没有定时器，不调用状态就不会自己跳。
+
+| 动作 | 注解 |
+| --- | --- |
+| `createPoolInfo` | 写入 `settleTime`、`endTime`、`interestRate`。利率在这里锁定，池子存续期间不改 |
+| `settle` | `settleTime` 之后、状态仍是 MATCH。按预言机价格和抵押率算出成交额，取两边较小的一边。不转币、不铸 sp/jp。一边供给是 0 则池子变成 UNDONE |
+| `finish` | 到期、状态是 EXECUTION。卖掉抵押物覆盖本金加利息，写下 `finishAmountLend` / `finishAmountBorrow`。有滑点保护：换回来的稳定币必须不少于应还额 |
+| `liquidate` | 还在 EXECUTION、已过 `settleTime` 就可以调。利息公式和 `finish` 相同，但没有滑点保护，换不够的部分由放款人承担 |
+| `setPause` | 暂停用户存取。已经在池子里的资产要等恢复后才能 claim / withdraw |
+
+**平台**
+
+不单独调函数。`finish` / `liquidate` 把 `lendFee`、`borrowFee` 打到 `feeAddress`。
 
 ### 4.2 一个池子里的两类资产
 
@@ -206,7 +241,7 @@ stateDiagram-v2
 
 ---
 
-## 6. 完整用户旅程（对照前端页面）
+## 6. 完整用户旅程
 
 ![](https://files.seeusercontent.com/2026/11/16/3ugX/Pledge.png)
 
@@ -215,12 +250,10 @@ stateDiagram-v2
 ```mermaid
 sequenceDiagram
     participant U as 放款人
-    participant FE as 前端
     participant ERC as lendToken
     participant P as PledgePool
     participant SP as spToken
 
-    U->>FE: 市场页选池（数据来自后端 API）
     U->>ERC: approve(PledgePool, amount)
     U->>P: depositLend(pid, amount)
     Note over P: MATCH 且 now < settleTime<br/>只记账，不铸币
@@ -234,16 +267,6 @@ sequenceDiagram
     P->>SP: burn(user, spAmount)
     P->>U: 转回稳定币本金+利息（或清算残值）
 ```
-
-前端对应：
-
-| 步骤 | 页面 / 组件 | 调用 |
-| --- | --- | --- |
-| 看池子 | `pages/Dapp/Home` | `userServer.getpoolBaseInfo`（HTTP） |
-| 授权 + 存款 | `components/Coin_pool` | `ERC20Server.Approve` → `PoolServer.depositLend` |
-| 领 sp / 退超额 | `AccessTab` / `Refund` | `getclaimLend` / `getrefundLend` |
-| 到期赎回 | `ClaimTime` | `getwithdrawLend` |
-| 募集失败 | `Refund` | `getemergencyLendWithdrawal` |
 
 ### 6.2 借款人
 
@@ -435,278 +458,28 @@ msgHash = keccak256(msg.sender, address(this))
 
 ---
 
-## 8. 后端层
+## 8. 链下：只做列表
 
-### 8.1 为什么要后端
+合约是资产和凭证的账本。用户存、取、领凭证都直接调 `PledgePool`，不经过后端。后端也不替池子调用 `settle` / `finish` / `liquidate`。
 
-链上 `poolBaseInfo(i)` 可以查，但前端列表需要：
-
-- 一次拿全部池子（避免前端对每个 pid 发 eth_call）
-- 拼上代币符号、logo、法币价格
-- 按 chainId 过滤、分页搜索
-
-所以后端做的是 **只读索引服务**：把链上状态镜像到 MySQL，再通过 REST 吐给前端。  
-**用户存取款不经过后端。** 后端也不替用户调 `settle`。
-
-需求文档里写的「事件监听入库」是目标形态；**当前实现是轮询 view 函数，不是 FilterLogs。**
-
-### 8.2 双进程结构
-
-```
-pledge-backend/
-├── api/pledge_api.go          # gin HTTP + websocket + 库币行情
-└── schedule/pledge_task.go    # gocron 定时读链
-```
-
-| 进程 | 入口 | 职责 |
-| --- | --- | --- |
-| API | `go run pledge_api.go` | 对外 HTTP、静态资源、PLGR 价格 websocket |
-| Schedule | `go run pledge_task.go` | 定时同步池信息、预言机价格、代币元数据、余额告警 |
-
-两边共享 `config/`、`db/`、`contract/bindings/`（abigen 生成的 Go 绑定）。
-
-### 8.3 模块职责
-
-```mermaid
-flowchart LR
-    subgraph schedule
-        T[tasks/task.go]
-        PS[poolService 同步池]
-        TP[tokenPriceService 同步价格]
-        TS[tokenSymbolService 同步符号]
-        TL[tokenLogoService 同步图标]
-        BM[balanceMonitor 余额告警]
-    end
-
-    subgraph 存储
-        MySQL[(poolbases / pooldata / token_info)]
-        Redis[(MD5 去重 / 价格缓存)]
-    end
-
-    subgraph api
-        R[routes/route.go]
-        C[controllers]
-        S[services]
-        M[models 读库]
-    end
-
-    Chain[PledgePool / Oracle] --> PS
-    Chain --> TP
-    T --> PS & TP & TS & TL & BM
-    PS --> MySQL
-    PS --> Redis
-    TP --> MySQL
-    R --> C --> S --> M --> MySQL
-    FE[前端] --> R
-```
-
-| 路径 | 职责 |
-| --- | --- |
-| `schedule/services/poolService.go` | 核心同步：`PoolLength` → 逐池 `PoolBaseInfo` / `PoolDataInfo` → 入库 |
-| `schedule/services/tokenPriceService.go` | 读 Oracle `GetPrice`，变化才写 `token_info.price`；测试网还会 `SetPrice` |
-| `schedule/services/tokenSymbolService.go` | 读 ERC20 `symbol`，主网可拉远端 ABI |
-| `schedule/services/tokenLogoService.go` | 从 Pancake token list 拉 logo |
-| `schedule/services/balanceMonitor.go` | 池合约原生币余额过低发邮件 |
-| `api/routes/route.go` | 全部 HTTP 路由 |
-| `api/controllers/*` | 参数校验 + 调 service |
-| `api/models/poolBases.go` | 把 `poolbases` 行转成前端要的 JSON |
-| `contract/bindings/` | abigen 产物，schedule 用它发 eth_call |
-
-### 8.4 链上数据同步流程（不是事件监听）
-
-`tasks/task.go` 启动时先跑一轮，再按周期：
-
-| 任务 | 周期 | 链上调用 | 写入 |
-| --- | --- | --- | --- |
-| `UpdateAllPoolInfo` | 2 分钟 | `PoolLength` / `PoolBaseInfo` / `PoolDataInfo` / Fee | `poolbases`、`pooldata` |
-| `UpdateContractPrice` | 1 分钟 | Oracle `GetPrice` | `token_info.price` |
-| `UpdateContractSymbol` | 2 小时 | ERC20 `symbol` | `token_info.symbol` |
-| `UpdateTokenLogo` | 2 小时 | HTTP token list | `token_info.logo` |
-| `BalanceMonitor` | 30 分钟 | `BalanceAt(pool)` | 邮件 |
-| `SavePlgrPriceTestNet` | 30 分钟 | Oracle `SetPrice`（测试网写价） | 链上 |
-
-同步策略：
-
-1. 全量枚举 pid（新池最多延迟一个周期才出现在列表）
-2. 把结构体 JSON 后算 MD5，和 Redis 旧哈希比较
-3. **有变化才写 MySQL**，减少无意义 UPDATE
-
-和「事件驱动索引」（The Graph / 自建 log 扫描）对比：轮询实现简单、不怕漏事件，但实时性差、gas 无关却耗 RPC。同类型项目里，订单簿/NFT 市场更常扫 event；这种池子数量很少的借贷协议，轮询够用。
-
-注意：`poolService` 给 `data_info` 算 MD5 时传入的仍是 `poolBase`。`pooldata` 往往跟着 `poolbases.state` 一起变，所以多数时候能蒙对；若只有成交额字段变、基础信息不变更，可能漏更新。读代码时带着这个问题看即可。
-
-### 8.5 API 设计
-
-前缀：`/api/v` + `config.Env.Version`（当前 v21）。
-
-| 方法 | 路径 | 鉴权 | 给谁用 |
-| --- | --- | --- | --- |
-| GET | `/poolBaseInfo?chainId=` | 无 | 市场列表（前端主接口） |
-| GET | `/poolDataInfo?chainId=` | 无 | 成交额 settle/finish/liquidation |
-| GET | `/token` | 无 | 代币清单（Uniswap tokenlist 形态） |
-| POST | `/pool/search` | JWT | 管理端搜索 |
-| POST | `/pool/debtTokenList` | JWT | sp/jp 列表 |
-| GET | `/price` | 无 | PLGR 对 U 价格 |
-| POST | `/pool/setMultiSign` | JWT | 管理端保存多签配置 |
-| POST | `/pool/getMultiSign` | JWT | 读多签配置 |
-| POST | `/user/login` | 无 | 管理登录（默认 admin/password） |
-| POST | `/user/logout` | JWT | 登出 |
-
-分层：`routes → controllers → validate → services → models → MySQL`。  
-Controller 不碰链，也不碰用户钱包。`chainId` 查询参数是驼峰，调试不要写成 `chain_id`。
-
-登录与资金无关，只保护管理接口。前端市场页不需要登录。
-
-### 8.6 后端与合约怎么交互
-
-| 方向 | 实际做法 |
-| --- | --- |
-| 读池子 | `ethclient.Dial` + `bindings.NewPledgePoolToken` + `PoolBaseInfo(nil, pid)` |
-| 读价格 | `BscPledgeOracle*.GetPrice` |
-| 写价格 | 测试网 `SetPrice`（持有 `PlgrAdminPrivateKey`） |
-| 写借贷 | **没有。** schedule 源码里搜不到 `Settle` / `DepositLend` |
-| 事件 | **没有 FilterLogs / WatchDepositLend** |
-
-`abigen` 用法见 `pledge-backend/docs/NOTE.md`：用 ABI+BIN 生成 `pledgePoolToken.go`。  
-后端「与合约交互」= **Go 绑定做 eth_call**，不是代发用户交易。
-
-API 进程另有：
-
-- Websocket：把库币 PLGR 价格推给前端
-- `kucoin.GetExchangePrice`：交易所行情，和借贷池本身解耦
+Schedule 每隔几分钟用 `eth_call` 读 `PoolLength`、`PoolBaseInfo`、`PoolDataInfo` 和预言机价格，有变化才写入数据库。这是轮询 view，不是扫事件日志。API 只读这些表，给页面提供池子列表、利率、期限和 logo。利率、期限来自链上字段；logo 是后端拼上去的。列表会比链上晚大约一个同步周期。个人的 `stakeAmount` 没有入库，页面要看自己的仓位就直接读合约。
 
 ---
 
-## 9. 前端层
+## 9. 从业务角度怎么读代码
 
-技术栈：React + web3-react + antd，带一套 Pancake 风格的 DEX。
+合约按学习笔记的课时读。拆解文档看到这里，函数级细节以笔记为准。
 
-### 9.1 页面与职责
-
-| 路由 | 页面 | 业务 |
-| --- | --- | --- |
-| `/:pool` | `Home` | 市场列表，展示利率、期限、抵押率、募集进度 |
-| `/:pid/:pool/:coin/:mode` | `Market_Pool` → `Coin_pool` | Lender / Borrower 授权并存款 |
-| `/Market/:mode` | `Market_Mode` | 我的仓位：claim / refund / withdraw |
-| `/DEX/*` | `Dex` / `AddLiquidity` | 独立兑换与加池，不走 PledgePool |
-
-### 9.2 数据从哪来
-
-```
-列表、费率、logo、展示用价格  →  后端 HTTP（MySQL 镜像）
-我的 stakeAmount / hasNoClaim →  合约 userLendInfo / userBorrowInfo
-授权额度、钱包余额           →  ERC20 allowance / balanceOf
-真正转账                      →  MetaMask send Transaction
-```
-
-`services/index.ts` 把两类调用收在一起：
-
-- `userServer`：axios 调 `/poolBaseInfo`、`/poolDataInfo`
-- `PoolServer` / `ERC20Server`：web3 合约方法
-
-前端合约地址在 `pledge-fe/src/utils/constants.ts`，按 chainId 97 / 56 切换测试网与主网。
-
-### 9.3 一次存款在前端长什么样
-
-`Coin_pool`：
-
-1. 用后端返回的 `lendToken` / `borrowToken` 地址
-2. `ERC20Server.Approve(token, amount, chainId)` → 授权给 PledgePool
-3. `PoolServer.depositLend(pid, amount, token, chainId)`  
-   若 token 是 `0x000…000`，把 `value` 一并带上（原生币）
-
-`AccessTab` 调 `claim*`，`Refund` 调 `refund*` / `emergency*`，`ClaimTime` 调 `withdraw*`。  
-前端按钮和合约方法基本一一对应，没有后端代发。
+1. `createPoolInfo`：期限和利率写在哪。
+2. `depositLend` / `depositBorrow`：只记账，不铸 sp/jp。
+3. `settle`：成交额怎么取两边较小的一边，这一步不转钱。
+4. `refund*` / `claim*`：没成交的怎么退，成交的凭证在哪个函数铸。
+5. `finish` / `liquidate`：利息公式一样，清算没有滑点保护。
+6. `withdrawLend` / `withdrawBorrow`：到期拿的是 `finishAmount*`，不是原来的 `stakeAmount`。
 
 ---
 
-## 10. 三端数据流转（总图）
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User as 用户
-    participant FE as 前端
-    participant API as 后端 API
-    participant DB as MySQL
-    participant Sch as schedule
-    participant Chain as PledgePool
-
-    Note over Sch,Chain: 后台持续进行
-    Sch->>Chain: 每 2 分钟 PoolLength / PoolBaseInfo
-    Chain-->>Sch: 池参数、supply、state
-    Sch->>DB: MD5 有变化才写入
-
-    Note over User,FE: 浏览
-    User->>FE: 打开市场页
-    FE->>API: GET /poolBaseInfo?chainId=97
-    API->>DB: SELECT poolbases
-    DB-->>FE: 列表 + token logo/price
-
-    Note over User,Chain: 操作资金（不经过后端）
-    User->>FE: Approve + Deposit
-    FE->>Chain: depositLend / depositBorrow
-    Chain-->>User: 交易回执
-
-    Note over Sch,FE: 最多约 2 分钟后列表刷新
-    Sch->>Chain: 再次读取 lendSupply
-    Sch->>DB: 更新
-    FE->>API: 重新拉列表
-
-    Note over User,Chain: 个人仓位仍读链
-    FE->>Chain: userLendInfo(account, pid)
-    Chain-->>FE: stakeAmount / hasNoClaim
-```
-
-三条铁律：
-
-1. **钱只在链上动。** 后端不托管私钥（测试网给 Oracle 写价除外）。
-2. **列表可以脏、可以延迟。**  ind ex 慢了两分钟，不影响用户资产。
-3. **个人仓位必须读链。** `userLendInfo` 没有入库，前端直连合约。
-
-这是 Web3 后端的标准形态：**索引层 + 展示层**，不是传统「服务端记账、再上链」的中心化后端。
-
----
-
-## 11. 从业务角度怎么读代码
-
-不必按文件名从头到尾读。建议按问题读：
-
-### 第一遍：状态机（2 小时）
-
-只看 `PledgePool.sol` 里这些符号：
-
-- `enum PoolState`
-- 六个修饰器：`timeBefore` / `timeAfter` / `stateMatch` / `stateNotMatchUndone` / `stateFinishLiquidation` / `stateUndone`
-- `createPoolInfo` → `settle` → `finish` / `liquidate`
-
-问自己：每个函数允许在哪个状态调用？钱在这一步有没有离开合约？
-
-### 第二遍：份额怎么分（2 小时）
-
-盯住反复出现的：
-
-```
-userShare = stakeAmount × 1e18 / 池子总 supply
-金额     = 池子某字段 × userShare / 1e18
-```
-
-`refund*`、`claim*`、`withdraw*` 都是这套。凭证（sp/jp）的作用是把「份额」变成可转让 ERC20。
-
-### 第三遍：后端镜像（1 小时）
-
-`schedule/tasks/task.go` → `poolService.go` → `api/routes/route.go` → 前端 `Home/index.tsx` 的 `getPoolInfo`。
-
-问自己：前端列表上的利率、日期、logo，分别是链上字段还是后端拼上去的？
-
-### 第四遍：前端按钮（1 小时）
-
-`Coin_pool` / `AccessTab` / `Refund` / `ClaimTime` 里搜 `services.PoolServer`。  
-每个按钮对上 7.2 的表，就能讲「用户点了什么 → 链上发生什么」。
-
----
-
-## 12. 同类型 Web3 项目怎么快速上手
+## 10. 同类型 Web3 项目怎么快速上手
 
 Pledge 是「有期限的抵押借贷 + 链下索引」这一类。换到别的项目，用同一套问题清单：
 
@@ -725,7 +498,7 @@ Pledge 是「有期限的抵押借贷 + 链下索引」这一类。换到别的�
 
 ---
 
-## 13. 讲解提纲（答辩 / 面试按这个说）
+## 11. 讲解提纲（答辩 / 面试按这个说）
 
 **1. 这是什么**  
 固定利率、固定期限的抵押借贷协议。募集期内双边存入，settle 一次性撮合，到期按锁定利率还本付息。
@@ -739,13 +512,10 @@ Aave 是共享资金池、浮动利率、随存随借、逐仓清算。Pledge �
 **4. 合约怎么分工**  
 PledgePool 管状态机；DebtToken 只是可 mint/burn 的 ERC20；Oracle 给 settle 和清算提供价格；多签卡住所有管理操作；DEX 只在到期和清算时被调用。
 
-**5. 后端干什么**  
-两个进程。schedule 每两分钟 eth_call 把池子抄进 MySQL；api 给前端列表。用户交易不经过后端。它不是事件监听器，是轮询索引。
+**5. 链下干什么**  
+Schedule 轮询链上 view，把池子抄进数据库给列表用。用户交易不经过后端，个人仓位直接读合约。
 
-**6. 前端干什么**  
-列表走 REST；存取走钱包。`PoolServer` 与合约方法同名，按钮和链上动作一一对应。
-
-**7. 风险点（显示你读过实现）**  
+**6. 风险点**  
 - settle/finish 依赖管理员在线，链上无 cron  
 - 清算无滑点保护，薄流动性交易对可能让放款人亏本  
 - Oracle 可手写价格，多签作恶能操纵撮合与清算  
@@ -754,7 +524,7 @@ PledgePool 管状态机；DebtToken 只是可 mint/burn 的 ERC20；Oracle 给 s
 
 ---
 
-## 14. 关键结构体（对照数据库）
+## 12. 关键结构体
 
 合约 `PoolBaseInfo` ↔ 表 `poolbases`：
 
@@ -789,11 +559,11 @@ userBorrowInfo[user][pid] = 同上
 
 ---
 
-## 15. 读完后的自检
+## 13. 拆解自检
 
 能不看代码回答下面这些问题，就算达到拆解阶段的要求：
 
-1. 用户点「存款」时，链上铸不铸 spToken？为什么？
+1. `depositLend` 这一笔里铸不铸 spToken？成交的那部分在哪个函数铸，没成交的怎么退？
 2. `settle` 转不转钱？成交额两个数字怎么来的？
 3. 固定利率的「固定」体现在哪几个参数上？
 4. 放款人到期拿钱，走的是哪笔余额（`finishAmountLend` 还是原来的 `stakeAmount`）？
@@ -802,4 +572,12 @@ userBorrowInfo[user][pid] = 同上
 7. 如果管理员一直不调用 `finish`，用户的钱在哪、能不能自己取？
 8. 换一个「固定期限债券」项目，你准备先打开哪个合约函数？
 
-若第 7 题卡住：执行期内用户只能 refund / claim，**不能** `withdrawLend`。withdraw 必须等到 FINISH 或 LIQUIDATION。管理员不点 `finish`，资金会一直锁在池里——这是「无 cron + 多签推进状态机」的最大产品风险，也是讲架构时最有说服力的一句。
+答：
+
+1. `depositLend` 这一笔不铸 sp。成交的部分在 `claimLend` 按 `settleAmountLend` 铸，没成交的由 `refundLend` 退回稳定币。
+2. `settle` 不转钱。
+3. 固定利率锁在 `_settleTime`、`_endTime`、`_interestRate`。
+4. 到期拿的是 `finishAmountLend`，不是 `stakeAmount`。
+5. 换一个固定期限项目，先打开 `createPoolInfo`。
+6. 不答
+7. 执行期内用户只能 refund / claim，**不能** `withdrawLend`。withdraw 必须等到 FINISH 或 LIQUIDATION。管理员不点 `finish`，资金会一直锁在池里——这是「无 cron + 多签推进状态机」的最大产品风险，也是讲架构时最有说服力的一句。

@@ -8,7 +8,11 @@ pragma solidity ^0.8.19;
  * @dev 业务职责：
  *   - 存储 protocolShare（通常为万分比或类似单位，具体由 LibPayInfo 约定上限）。
  *   - 仅 Owner 可修改 protocolShare，且不得超过 LibPayInfo.MAX_PROTOCOL_SHARE。
- *   - 被订单簿等合约继承，在分配款项时读取 protocolShare 计算并转给协议方。
+ *   - 被订单簿等合约继承，在分配款项时读取 protocolShare 计算协议费。
+ *     费先留在 OrderBook，不在成交当时转给 Owner。
+ *
+ * 【学习注释】贯穿例子 protocolShare = 250，TOTAL_SHARE = 10000，即 2.5%。
+ * 成交价 1 ETH → 手续费 0.025 ETH。上限 MAX_PROTOCOL_SHARE = 1000（10%）。
  */
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";

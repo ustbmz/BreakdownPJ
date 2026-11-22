@@ -25,6 +25,16 @@ import {ProtocolManager} from "./ProtocolManager.sol";
  * @dev 支持两种订单类型：
  *      - List（挂单）：卖家将NFT存入金库，等待买家匹配
  *      - Bid（出价）：买家将ETH存入金库，等待卖家接受
+ *
+ * 【学习注释 · 文件总览】第 5–10 课都在这个合约。
+ * 它继承 OrderStorage（盘口）、OrderValidator（成交/取消）、ProtocolManager（费率），
+ * 资产实际住在 _vault 指向的 EasySwapVault。
+ *
+ * 两条成交（第 7 课），成交价取「被吃的那一边」：
+ *   卖家接受 Bid：fillPrice = 买价，msg.value 必须是 0，ETH 从 Vault 里的 Bid 抽出
+ *   买家接受 List：fillPrice = 卖价，List 必须已在盘口；Bid 可以当场用 msg.value 付（Buy Now）
+ * 协议费从成交价扣除，先留在本合约，Owner 以后 withdrawETH 提走。
+ * msg.sender 必须是卖单或买单的 maker，第三方不能替两边成交。
  */
 contract EasySwapOrderBook is
     IEasySwapOrderBook,
@@ -214,6 +224,12 @@ contract EasySwapOrderBook is
      * 
      * @param newOrders 多个订单结构数据数组
      * @return newOrderKeys 返回订单唯一标识数组，如果某个订单创建失败，对应位置返回空标识
+     *
+     * 【学习注释 · 第 5 课】批量、部分成功。
+     * 某一单没授权、amount 不对，_makeOrderTry 返回 SENTINEL，不 revert。
+     * 前面已经 deposit 进 Vault 的单留在那里。所以两单 List、第二单失败时，第一单已经锁进金库。
+     * Bid 所需 ETH = 单价 × amount，成功的才累加；msg.value 多出来的退回。ETH 不够会在 depositETH 里 revert。
+     * pause 之后本函数有 whenNotPaused，不能再挂单。已经在 Vault 里的 NFT 要等 unpause 再 cancel。
      */
     function makeOrders(
         LibOrder.Order[] calldata newOrders
@@ -355,8 +371,10 @@ contract EasySwapOrderBook is
     }
 
     /**
-     * @notice 批量原子性匹配订单（批量撮合交易）
-     * @dev 业务逻辑：使用delegatecall实现批量匹配，确保要么全部成功，要么全部失败
+     * @notice 批量匹配订单
+     * @dev 用 delegatecall 调 matchOrderWithoutPayback，让每一笔看到的 storage 和 msg.sender 仍是本合约 / 用户。
+     *      单笔失败只 emit BatchMatchInnerError，successes[i]=false，后面的单继续。不是整笔回滚。
+     *      多余 ETH 在循环结束后按累计 buyETHAmount 退一次，避免每笔都退。
      * 
      * @dev 使用场景1：批量购买NFT
      *      使用"有效的sellOrder订单"，构造匹配的buyOrder订单：
@@ -431,8 +449,9 @@ contract EasySwapOrderBook is
      * @dev 仅支持交易相关入口函数：
      *      - makeOrders / cancelOrders / editOrders / matchOrder / matchOrders
      * @dev 通过 delegatecall 保持 msg.sender 为用户本人，从而兼容 maker 权限校验。
-     * @dev 由于 delegatecall 下每个子调用看到的 msg.value 相同，为避免资金语义歧义，
-     *      一次 multicall 最多允许 1 个“可能消耗 msg.value”的子调用。
+     * @dev 由于 delegatecall 下每个子调用看到的 msg.value 相同，为避免同一笔钱被花两次，
+     *      一次 multicall 最多允许 1 个会用到 msg.value 的子调用（make / edit / match）。
+     *      「先出价再立刻吃一个卖单」两个都 payable，会被 "HD: multi value calls" 拦住。这是设计约束。
      * @param data ABI 编码后的调用数组
      * @param revertOnFail 为 true 时任一失败将整笔回滚；为 false 时仅记录失败并继续
      * @return successes 每个子调用是否成功
@@ -638,7 +657,8 @@ contract EasySwapOrderBook is
 
     /**
      * @notice 尝试编辑订单（内部函数）
-     * @dev 编辑订单实际上是取消旧订单并创建新订单的过程
+     * @dev 编辑订单实际上是取消旧订单并创建新订单。OrderKey 是整单哈希，price 一变 key 就变，旧 key 不能再 match。
+     *      List 改价时 NFT 不离开 Vault，只 editNFT 把记账从旧 key 迁到新 key。
      * 
      * @dev 编辑限制检查：
      *      1. saleKind、side、maker、nft（collection和tokenId）必须与旧订单匹配
@@ -760,7 +780,16 @@ contract EasySwapOrderBook is
      * @param sellOrder 挂单订单（List订单）
      * @param buyOrder 出价订单（Bid订单）
      * @param msgValue 调用者传入的ETH金额
-     * @return costValue 实际花费的ETH金额（仅买家接受挂单时返回，卖家接受出价时为0）
+     * @return costValue 买家当场付的 ETH。卖家吃 Bid、或 Bid 已在盘口时为 0，外层据此退 msg.value 余款。
+     *
+     * 【学习注释 · 第 7 课】两个分支，成交价不对称：
+     *   msg.sender == 卖单 maker：成交价 = 买价。Bid 必须已在盘口（ETH 在 Vault）。
+     *     List 可以已在盘口（withdrawNFT），也可以现挂现吃（transferERC721，卖家要已授权 Vault）。
+     *     msg.value 必须为 0。贯穿例子：B 锁了 1.2 ETH，S 接受 → S 得 1.2×(1-费率)，NFT 给 B。
+     *   msg.sender == 买单 maker：成交价 = 卖价。List 必须已在盘口。
+     *     Bid 不在盘口就是 Buy Now：msg.value >= 卖价，不必事先 make Bid。
+     *     买价高于卖价时，多出的 ETH 退买家。
+     *   两边都不是 msg.sender → "HD: sender invalid"。没有第三方代成交。
      */
     function _matchOrder(
         LibOrder.Order calldata sellOrder,
@@ -890,12 +919,11 @@ contract EasySwapOrderBook is
      * @dev 匹配条件：
      *      1. 两个订单不能是同一个订单
      *      2. sellOrder必须是List订单，buyOrder必须是Bid订单
-     *      3. sellOrder必须是FixedPriceForItem类型
+     *      3. 卖单必须是 FixedPriceForItem。集合出价只能出现在买侧
      *      4. 两个订单的创建者不能是同一人
-     *      5. 资产必须匹配：
-     *         - buyOrder是FixedPriceForCollection类型（集合出价），或
-     *         - 两个订单的collection和tokenId必须相同
-     *      6. 两个订单都必须未完全成交
+     *      5. 集合 Bid 不看买侧 tokenId，以卖单上的 tokenId 交割；
+     *         否则两边的 collection 和 tokenId 必须相同
+     *      6. 两边 filledAmount 都还小于 amount（没关单、也还没被标成取消）
      * 
      * @param sellOrder 挂单订单
      * @param buyOrder 出价订单
@@ -1007,7 +1035,8 @@ contract EasySwapOrderBook is
 
     /**
      * @notice 暂停合约（仅所有者）
-     * @dev 暂停后所有交易功能将无法使用
+     * @dev 暂停后 make / cancel / edit / match 都有 whenNotPaused，不能再调。
+     *      已经锁在 Vault 里的 NFT 出不来，只能等 unpause 之后 cancel 或 match。
      */
     function pause() external onlyOwner {
         _pause();

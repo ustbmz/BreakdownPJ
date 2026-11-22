@@ -8,6 +8,17 @@ pragma solidity ^0.8.19;
  *   - 使用红黑树按价格排序（Bid 侧高价优先，List 侧低价优先），便于获取「最优价」和「下一档价」。
  *   - 同一 collection + side + price 下用链表维护订单队列（FIFO，时间优先）。
  *   - 提供 add/remove 订单、按条件分页获取订单、获取最优可成交订单等能力，供订单簿撮合与展示使用。
+ *
+ * 【学习注释 · 第 4 课】三层结构：
+ *   priceTrees[collection][side]               红黑树，节点是价格
+ *   orderQueues[collection][side][price]       这一档的链表头尾
+ *   orders[orderKey] = { order, next }         链表节点
+ *
+ * 价格方向：List 取 first() = 最低卖价；Bid 取 last() = 最高买价。
+ * 同价：新单接到 tail，先挂的留在 head，先来先成交。
+ *
+ * 例子：卖价 1.5、1.0、2.0 三档，getBestPrice(collection, List) 是 1.0。
+ * 1.0 这一档有两单，先成交 head 那一单。
  */
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -29,7 +40,7 @@ contract OrderStorage is Initializable {
     mapping(address => mapping(LibOrder.Side => RedBlackTreeLibrary.Tree))
         public priceTrees;
 
-    /// @dev 每个 collection、方向、价格下的订单队列（链表头尾），同价按 orderKey 顺序（时间优先）
+    /// @dev 每个 collection、方向、价格下的订单队列。同价按入队顺序：head 先成交，新单接 tail
     mapping(address => mapping(LibOrder.Side => mapping(Price => LibOrder.OrderQueue)))
         public orderQueues;
 
@@ -70,7 +81,7 @@ contract OrderStorage is Initializable {
         }
     }
 
-    /// @notice 将订单写入存储：若该价格档未在红黑树中则插入，并将订单加入对应价格下的队列尾部（同价时间优先）
+    /// @notice 入簿。该价格档第一次出现就 tree.insert；队列空则 head=tail=本单，否则接到旧 tail 后面
     function _addOrder(
         LibOrder.Order memory order
     ) internal returns (OrderKey orderKey) {
