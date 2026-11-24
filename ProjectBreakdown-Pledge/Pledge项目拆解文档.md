@@ -67,7 +67,7 @@ flowchart TB
         Wallet[MetaMask]
     end
 
-    subgraph 前端 DApp
+    subgraph G2["前端 DApp"]
         Market[市场列表页]
         PoolPage[存入页 Coin_pool]
         Portfolio[仓位页 Market_Mode]
@@ -390,12 +390,12 @@ lendAmount = 本金 + 利息
 
 ```mermaid
 flowchart TD
-    subgraph 募集 MATCH
+    subgraph G1["募集 MATCH"]
         L1[放款人稳定币] -->|depositLend| Pool[PledgePool 托管]
         B1[借款人抵押物] -->|depositBorrow| Pool
     end
 
-    subgraph 执行 EXECUTION
+    subgraph G2["执行 EXECUTION"]
         Pool -->|refundLend 未成交| L2[放款人]
         Pool -->|refundBorrow 未成交| B2[借款人]
         Pool -->|claimBorrow 成交稳定币| B3[借款人拿走 U]
@@ -403,7 +403,7 @@ flowchart TD
         Pool -->|claimBorrow mint| JP[jpToken]
     end
 
-    subgraph 到期 FINISH 或清算 LIQUIDATION
+    subgraph G3["到期 FINISH 或清算 LIQUIDATION"]
         Pool -->|DEX 卖出部分抵押物| DEX[PancakeSwap]
         DEX -->|换回稳定币| Pool
         Pool -->|超出本息部分| Fee[feeAddress]

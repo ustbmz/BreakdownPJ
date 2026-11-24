@@ -25,6 +25,8 @@ BTC 价格：30000 U    稳定币价格：1 U
 
 4. 学习以 `pledge/` 和 `multiSignature/` 为准。`mock/` 和测试里的函数签名可能不一样（例如测试用的 `MockPledgePool.depositBorrow` 多一个 deadline，`settle` 用 `onlyOwner` 而不是多签）。
 
+回看时先记住这四句：`depositLend` / `depositBorrow` 不铸 sp/jp。`settle` 不转钱，成交额取两边较小的一边。到期拿走的是 `finishAmountLend`，不是 `stakeAmount`。管理员不调用 `finish`，钱就留在池子里。
+
 ---
 
 ## 学习地图（先看一眼，不必此刻读懂）

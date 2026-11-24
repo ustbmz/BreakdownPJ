@@ -24,6 +24,8 @@ salt ≠ 0
 
 4. 学习以 `contracts/` 下正式合约为准。`contracts/test/` 只在跑测试时看。
 
+回看时先记住这四句：NFT 授权给 Vault，不是 OrderBook。Buy Now 不必先 `make` Bid，钱从 `msg.value` 出。字段不合格的单返回 `0x0`，其它单可以留下；没授权或 ETH 不够会整笔回滚。成交价用被吃掉的那一边。
+
 ---
 
 ## 学习地图（先看一眼）

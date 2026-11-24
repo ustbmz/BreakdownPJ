@@ -192,14 +192,14 @@ flowchart TB
 ## 5. 核心业务流程
 
 ```mermaid
-stateDiagram-v2
-    [*] --> 空盘口
-    空盘口 --> 挂单中: makeOrders List/Bid
-    挂单中 --> 挂单中: editOrders 改价
-    挂单中 --> 已取消: cancelOrders
-    挂单中 --> 已成交: matchOrder
-    已取消 --> [*]
-    已成交 --> [*]
+flowchart LR
+    startNode([开始]) --> emptyNode[空盘口]
+    emptyNode -->|makeOrders| listedNode[挂单中]
+    listedNode -->|editOrders 改价| listedNode
+    listedNode -->|cancelOrders| cancelledNode[已取消]
+    listedNode -->|matchOrder| filledNode[已成交]
+    cancelledNode --> endNode([结束])
+    filledNode --> endNode
 ```
 
 链上订单状态靠两张表：
@@ -210,6 +210,8 @@ stateDiagram-v2
 ---
 
 ## 6. 完整用户旅程
+
+![](./NFTMarket.png)
 
 ### 6.1 卖家挂单
 
