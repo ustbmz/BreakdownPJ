@@ -196,36 +196,15 @@ jp 总量 = settleAmountLend × martgageRate / 1e8
 整个项目围着一张状态机转。**先背这张图，再看函数。**
 
 ```mermaid
-stateDiagram-v2
-    [*] --> MATCH: createPoolInfo 建池
-    MATCH --> EXECUTION: settle 双边都有资金
-    MATCH --> UNDONE: settle 任一方为 0
-    EXECUTION --> FINISH: finish 到期卖抵押物还本息
-    EXECUTION --> LIQUIDATION: liquidate 抵押物跌破阈值
-    FINISH --> [*]
-    LIQUIDATION --> [*]
-    UNDONE --> [*]
-
-    note right of MATCH
-        settleTime 之前
-        双方只能存款
-    end note
-    note right of EXECUTION
-        可 refund 超额、claim 凭证
-        借款人领 jp 并提走稳定币
-    end note
-    note right of FINISH
-        endTime 之后
-        burn 凭证分钱
-    end note
-    note right of LIQUIDATION
-        整池出局
-        放款人优先分清算所得
-    end note
-    note right of UNDONE
-        募集失败
-        原路紧急提取
-    end note
+flowchart TD
+    startNode([开始]) -->|createPoolInfo 建池| matchNode["MATCH<br/>settleTime 之前，双方只能存款"]
+    matchNode -->|settle 双边都有资金| execNode["EXECUTION<br/>可 refund 超额、claim 凭证<br/>借款人领 jp 并提走稳定币"]
+    matchNode -->|settle 任一方为 0| undoneNode["UNDONE<br/>募集失败，原路紧急提取"]
+    execNode -->|finish 到期卖抵押物还本息| finishNode["FINISH<br/>endTime 之后，burn 凭证分钱"]
+    execNode -->|liquidate 抵押物跌破阈值| liqNode["LIQUIDATION<br/>整池出局，放款人优先分清算所得"]
+    finishNode --> endNode([结束])
+    liqNode --> endNode
+    undoneNode --> endNode
 ```
 
 时间轴：
@@ -564,20 +543,33 @@ userBorrowInfo[user][pid] = 同上
 能不看代码回答下面这些问题，就算达到拆解阶段的要求：
 
 1. `depositLend` 这一笔里铸不铸 spToken？成交的那部分在哪个函数铸，没成交的怎么退？
+
+   `depositLend` 这一笔不铸 sp。成交的部分在 `claimLend` 按 `settleAmountLend` 铸，没成交的由 `refundLend` 退回稳定币。
+
 2. `settle` 转不转钱？成交额两个数字怎么来的？
+
+   `settle` 不转钱。抵押物按预言机价格和抵押率换成可借额，再和放款人存入额取较小的一边，写成 `settleAmountLend` 和 `settleAmountBorrow`。
+
 3. 固定利率的「固定」体现在哪几个参数上？
+
+   固定利率锁在 `_settleTime`、`_endTime`、`_interestRate`。
+
 4. 放款人到期拿钱，走的是哪笔余额（`finishAmountLend` 还是原来的 `stakeAmount`）？
+
+   到期拿的是 `finishAmountLend`，不是 `stakeAmount`。
+
 5. 后端 schedule 会不会帮池子调用 `settle`？
+
+   不会。schedule 只轮询 view，把池子抄进数据库。
+
 6. 前端市场列表的 logo 和利率，分别来自哪里？
+
+   利率来自链上字段。logo 是后端拼上去的。
+
 7. 如果管理员一直不调用 `finish`，用户的钱在哪、能不能自己取？
+
+   执行期内用户只能 refund / claim，**不能** `withdrawLend`。withdraw 必须等到 FINISH 或 LIQUIDATION。管理员不点 `finish`，资金会一直锁在池里——这是「无 cron + 多签推进状态机」的最大产品风险，也是讲架构时最有说服力的一句。
+
 8. 换一个「固定期限债券」项目，你准备先打开哪个合约函数？
 
-答：
-
-1. `depositLend` 这一笔不铸 sp。成交的部分在 `claimLend` 按 `settleAmountLend` 铸，没成交的由 `refundLend` 退回稳定币。
-2. `settle` 不转钱。
-3. 固定利率锁在 `_settleTime`、`_endTime`、`_interestRate`。
-4. 到期拿的是 `finishAmountLend`，不是 `stakeAmount`。
-5. 换一个固定期限项目，先打开 `createPoolInfo`。
-6. 不答
-7. 执行期内用户只能 refund / claim，**不能** `withdrawLend`。withdraw 必须等到 FINISH 或 LIQUIDATION。管理员不点 `finish`，资金会一直锁在池里——这是「无 cron + 多签推进状态机」的最大产品风险，也是讲架构时最有说服力的一句。
+   换一个固定期限项目，先打开 `createPoolInfo`。
